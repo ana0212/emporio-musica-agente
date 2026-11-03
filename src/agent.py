@@ -275,14 +275,20 @@ def is_policy_question(
 
 def build_policy_query(message: str) -> str:
     """Expand policy queries with relevant terms in Portuguese."""
-    normalized = message.casefold()
+    normalized = normalize_text(message)
 
-    if "preferência" in normalized or "preferencia" in normalized:
+    # Consultas sobre preferência, inclusive quando o cliente
+    # menciona apenas cor, modelo ou tamanho.
+    if any(term in normalized for term in (
+        "preferencia", "cor", "modelo", "tamanho",
+        "nao gostei", "nao ficou como eu queria"
+    )):
         return (
             f"{message} Trocas por Preferência: "
-            "cor, modelo, tamanho, prazo de 7 dias, "
-            "disponibilidade do produto, perfeito estado, "
-            "embalagem original e diferença de valor."
+            "troca por escolha ou preferência do cliente, "
+            "cor, modelo e tamanho; prazo de 7 dias; "
+            "disponibilidade do produto; produto em perfeito estado; "
+            "embalagem original; diferença de valor."
         )
 
     if "defeito" in normalized:
@@ -292,13 +298,27 @@ def build_policy_query(message: str) -> str:
             "garantia do fabricante."
         )
 
-    if "arrependimento" in normalized or "devolução" in normalized:
+    if any(term in normalized for term in (
+        "arrependimento",
+        "arrependi",
+        "devolucao",
+        "devolver",
+        "compra online",
+        "internet",
+    )):
         return (
-            f"{message} Direito de Arrependimento: "
-            "compras online, prazo de 7 dias, devolução e reembolso."
+            f"{message} Direito de Arrependimento em compras online: "
+            "o consumidor pode desistir da compra em até 7 dias "
+            "corridos após o recebimento, sem necessidade de justificativa. "
+            "O produto deve estar na embalagem original, sem sinais de uso, "
+            "com acessórios e manuais. O reembolso ocorre na mesma forma "
+            "de pagamento em até 10 dias úteis. O frete de devolução "
+            "é por conta da loja. Não confundir devolução por arrependimento "
+            "com troca por preferência."
         )
 
     return message
+
 def get_greeting_context(message: str) -> str:
     """Identify the subject of the customer's first question."""
     text = normalize_text(message)
@@ -372,14 +392,70 @@ def is_closing_intent(message: str) -> bool:
         "obrigada",
         "obrigado",
         "nao",
+        "sim ficou claro",
+        "sim entendi",
+        "agora entendi",
+        "entendi sim",
+        "ficou claro",
+        "ficou claro obrigado",
+        "ficou claro obrigada",
+        "era isso obrigado",
+        "era isso obrigada",
     )
 
-    return text in closing_phrases
+    return any(
+        text == phrase or text.startswith(phrase + " ")
+        for phrase in closing_phrases
+    )
+
+def has_order_intent(message: str) -> bool:
+    """Identify requests to check an order."""
+    text = normalize_text(message)
+    return any(term in text for term in (
+        "pedido",
+        "status da compra",
+        "acompanhar compra",
+        "acompanhar pedido",
+    ))
+
+def get_order_information(
+    message: str,
+    history: list[dict[str, str]] | None = None,
+) -> tuple[bool, bool]:
+    """Check whether order ID and registered phone were provided."""
+
+    conversation = " ".join(
+        item.get("content", "")
+        for item in (history or [])[-10:]
+        if item.get("role") in ("user", "assistant")
+    )
+    conversation += " " + message
+
+    order_pattern = (
+        r"pedido\s*(?:n[úu]mero\s*)?(?:n[º°.]?\s*)?[:#-]?\s*(\d+)"
+    )
+    order_id_found = re.search(
+        order_pattern, conversation, re.IGNORECASE
+    ) is not None
+
+    phone_pattern = (
+        r"(?:telefone|celular|whatsapp|contato)"
+        r"\D{0,15}(\+?[\d\s().-]{10,20})"
+    )
+    phone_match = re.search(
+        phone_pattern, conversation, re.IGNORECASE
+    )
+
+    phone_found = False
+    if phone_match:
+        phone_digits = re.sub(r"\D", "", phone_match.group(1))
+        phone_found = len(phone_digits) in (10, 11, 12, 13)
+
+    return order_id_found, phone_found
 
 def ask_agent(
     user_message: str,
-    history: list[dict[str, str]] | None = None,
-) -> str:
+    history: list[dict[str, str]] | None = None,) -> str:
     """Run a bounded tool-calling conversation with the local model."""
 
     if not user_message.strip():
@@ -387,7 +463,7 @@ def ask_agent(
 
     has_history = bool(history)
 
-    # 1. Saudação simples: apresentação geral, sem confirmação.
+    # Saudação simples: apresentação geral, sem confirmação.
     if is_simple_greeting(user_message) and not has_history:
         return (
             "Olá! Sou o Kiko, assistente virtual da Empório da Música.\n\n"
@@ -398,32 +474,36 @@ def ask_agent(
             "- Trocas e devoluções\n"
             "- Políticas da loja"
         )
-
-    # 2. Encerramento somente quando o cliente indica que não
-    # precisa de mais ajuda.
-    last_assistant_message = next(
-        (
-            item.get("content", "")
-            for item in reversed(history or [])
-            if item.get("role") == "assistant"
-        ),
-        "",
-    )
-
-    last_message_asked_confirmation = (
-        "ficou claro?" in last_assistant_message.casefold()
-        or "posso ajudar com mais alguma informação?" in last_assistant_message.casefold()
-    )
-
-    # Encerramento determinístico
+    
+    # Encerramento direto, sem chamar o modelo.
     if has_history and is_closing_intent(user_message):
         return (
             "Agradecemos seu contato com a "
             "Empório da Música.\n\n"
-            "Quando precisar, estaremos à disposição, neste canal e no nosso WhatsApp. "
+            "Quando precisar, estaremos à disposição. "
             "Tenha um ótimo dia! 🎸"
         )
 
+    # Solicita os dados necessários antes de consultar um pedido.
+    if has_order_intent(user_message):
+        order_id_found, phone_found = get_order_information(
+            user_message, history
+        )
+
+        if not order_id_found and not phone_found:
+            return (
+                "Claro! Para consultar o status do seu pedido, "
+                "informe o número do pedido e o telefone cadastrado "
+                "na compra."
+            )
+
+        if not order_id_found:
+            return "Por favor, informe também o número do seu pedido."
+
+        if not phone_found:
+            return "Por favor, informe também o telefone cadastrado na compra."
+
+        
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT}
     ]
@@ -435,7 +515,7 @@ def ask_agent(
 
     answer = None
 
-    # 3. Recuperação de políticas
+    # Recuperação de políticas
     if is_policy_question(user_message, history):
         policy_query = build_policy_query(user_message)
         policy_results = search_store_policies(policy_query)
@@ -459,7 +539,17 @@ def ask_agent(
                 "Use os trechos recuperados do manual para responder "
                 "à pergunta original do cliente. Utilize somente "
                 "informações diretamente relacionadas à dúvida. "
-                "Não invente regras. Responda em português brasileiro.\n\n"
+                "Não invente regras nem misture regras de troca por "
+                "preferência com regras de troca por defeito. "
+                "Para troca por preferência, informe o prazo de 7 dias, "
+                "a disponibilidade do produto, o perfeito estado e a "
+                "embalagem original, conforme o manual. "
+                "Se os trechos não sustentarem uma informação, não a afirme. "
+                "Não comece a resposta negando um direito que os trechos "
+                "recuperados confirmam. Não apresente informações contraditórias. "
+                "Responda diretamente à pergunta do cliente, sem inventar "
+                "restrições ou condições adicionais. "
+                "Responda em português brasileiro.\n\n"
                 f"Trechos do manual:\n{policy_context}"
             ),
         })
@@ -476,7 +566,7 @@ def ask_agent(
 
         answer = response.message.content
 
-    # 4. Produtos, pedidos e demais assuntos
+    # Produtos, pedidos e demais assuntos
     else:
         for _ in range(MAX_TOOL_ROUNDS):
             response = chat(
@@ -515,7 +605,7 @@ def ask_agent(
             )
             answer = response.message.content
 
-    # 5. Proteção contra respostas vazias
+    # Proteção contra respostas vazias
     if not answer or answer.strip().casefold() in {"none", "null"}:
         return (
             "Não consegui formular uma resposta neste momento. "
@@ -524,7 +614,7 @@ def ask_agent(
 
     answer = answer.strip()
 
-    # 6. Apresentação contextual somente na primeira mensagem
+    # Apresentação contextual somente na primeira mensagem
     if not has_history:
         topic = get_greeting_context(user_message)
 
@@ -544,7 +634,7 @@ def ask_agent(
                 f"com {topic}.\n\n{answer}"
             )
 
-    # 7. Confirmação após respostas substantivas.
+    # Confirmação após respostas substantivas.
     answer = answer.strip()
 
     answer = re.sub(

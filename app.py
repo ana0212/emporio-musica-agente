@@ -274,9 +274,14 @@ else:
             with st.spinner("Kiko está preparando sua resposta..."):
 
                 try:
+                    # Atualiza o histórico antes de chamar o agente.
+                    st.session_state.agent_history.append(
+                        {"role": "user", "content": prompt}
+                    )
+
                     response = ask_agent(
                         user_message=prompt,
-                        history=st.session_state.agent_history,
+                        history=st.session_state.agent_history[:-1],
                     )
 
                     st.markdown(response)
@@ -288,10 +293,9 @@ else:
                         }
                     )
 
-                    st.session_state.agent_history.extend([
-                        {"role": "user", "content": prompt},
-                        {"role": "assistant", "content": response},
-                    ])
+                    st.session_state.agent_history.append(
+                        {"role": "assistant", "content": response}
+                    )
 
                 except Exception:
                     st.error(

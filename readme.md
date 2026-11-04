@@ -1,4 +1,4 @@
-🎸 Kiko — Agente de Atendimento da Empório da Música
+# 🎸 Kiko — Agente de Atendimento da Empório da Música
 
 Agente conversacional desenvolvido em Python para automatizar o atendimento inicial aos clientes da Empório da Música, uma loja fictícia especializada em instrumentos musicais, localizada em Campo Grande, Mato Grosso do Sul.
 
